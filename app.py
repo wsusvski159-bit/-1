@@ -3,7 +3,6 @@ from __future__ import annotations
 import html
 import os
 import secrets
-import shutil
 import uuid
 from pathlib import Path
 
@@ -22,12 +21,11 @@ UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
 MAX_UPLOAD_MB = int(os.getenv("MAX_UPLOAD_MB", "80"))
 APP_PASSWORD = os.getenv("APP_PASSWORD", "").strip()
 
-app = FastAPI(title="阿屿看视频 v1.1")
+app = FastAPI(title="阿屿看视频 v1.2")
 security = HTTPBasic(auto_error=False)
 
 
 def require_auth(credentials: HTTPBasicCredentials | None = Depends(security)) -> None:
-    """Optional Basic Auth. Set APP_PASSWORD on Render to protect API spend and reports."""
     if not APP_PASSWORD:
         return
     ok_user = credentials is not None and secrets.compare_digest(credentials.username, "xiaoyu")
@@ -48,15 +46,24 @@ def page(message: str = "") -> str:
         for r in reports
     ) or "<li>还没有分析记录</li>"
     msg = f'<div class="msg">{html.escape(message)}</div>' if message else ""
-    pw_note = "已启用访问密码。" if APP_PASSWORD else "⚠️ 当前没有设置 APP_PASSWORD；公网部署时请务必设置。"
+
+    gemini_ok = bool(os.getenv("GEMINI_API_KEY", "").strip())
+    deepseek_ok = bool(os.getenv("DEEPSEEK_API_KEY", "").strip())
+    setup = (
+        ("✅" if gemini_ok else "❌") + " Gemini 眼睛　" +
+        ("✅" if deepseek_ok else "○") + " DeepSeek 整理　" +
+        ("✅" if APP_PASSWORD else "⚠️") + " 网页密码"
+    )
+
     return f"""<!doctype html><html lang='zh-CN'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'>
-<title>阿屿看视频 v1.1</title><style>
+<title>阿屿看视频 v1.2</title><style>
 body{{font-family:system-ui,-apple-system,sans-serif;max-width:720px;margin:36px auto;padding:0 18px;line-height:1.6;background:#f7f3e9;color:#243329}}
-.card{{background:#fffdf7;padding:22px;border-radius:20px;box-shadow:0 8px 25px #0001;margin:16px 0}}button{{padding:11px 18px;border:0;border-radius:12px;background:#536b57;color:white;font-size:16px}}input{{max-width:100%}}.msg{{background:#eef5ec;padding:12px;border-radius:12px}}pre{{white-space:pre-wrap;word-break:break-word;background:#f5f5f2;padding:14px;border-radius:12px}}a{{color:#385a42}}small{{color:#667066}}</style></head><body>
-<h1>阿屿看视频 v1.1</h1><p>把短视频递进来：抽帧 + 音频转写 + 视觉分析。分析完成后原视频会删除，只留下文字报告。</p>{msg}
+.card{{background:#fffdf7;padding:22px;border-radius:20px;box-shadow:0 8px 25px #0001;margin:16px 0}}button{{padding:11px 18px;border:0;border-radius:12px;background:#536b57;color:white;font-size:16px}}input{{max-width:100%}}.msg{{background:#eef5ec;padding:12px;border-radius:12px}}.status{{background:#eef5ec;padding:12px;border-radius:12px}}pre{{white-space:pre-wrap;word-break:break-word;background:#f5f5f2;padding:14px;border-radius:12px}}a{{color:#385a42}}small{{color:#667066}}</style></head><body>
+<h1>阿屿看视频 v1.2</h1><p>Gemini 直接看视频的画面和声音，DeepSeek 再把观察整理成适合阿屿读取的报告。</p>
+<div class='status'>{html.escape(setup)}</div>{msg}
 <div class='card'><form action='/upload' method='post' enctype='multipart/form-data'><input type='file' name='video' accept='video/*' required><br><br><button type='submit'>给阿屿看</button></form></div>
 <div class='card'><h3>最近的视频</h3><ul>{items}</ul></div>
-<p><small>建议先用 30–60 秒短视频。{html.escape(pw_note)} OpenAI API 与 ChatGPT 订阅独立计费。</small></p>
+<p><small>建议先用 30–60 秒、80MB 以内短视频。Gemini API 与 ChatGPT 订阅独立；DeepSeek Key 可选，不填时直接使用 Gemini 的观察报告。</small></p>
 </body></html>"""
 
 
@@ -104,9 +111,9 @@ def report_page(video_id: str):
     r = get_report(video_id)
     if not r:
         raise HTTPException(404, "report not found")
-    transcript = html.escape(r.get("transcript") or "（无）")
     analysis = html.escape(r.get("analysis") or "")
-    return HTMLResponse(f"<meta name='viewport' content='width=device-width,initial-scale=1'><body style='font-family:system-ui;max-width:760px;margin:30px auto;padding:0 18px;line-height:1.65'><a href='/'>← 返回</a><h2>{html.escape(r.get('original_name') or video_id)}</h2><p>ID: <code>{html.escape(video_id)}</code></p><h3>阿屿可读分析</h3><pre style='white-space:pre-wrap'>{analysis}</pre><h3>音频转写</h3><pre style='white-space:pre-wrap'>{transcript}</pre></body>")
+    raw = html.escape(r.get("gemini_observation") or "")
+    return HTMLResponse(f"<meta name='viewport' content='width=device-width,initial-scale=1'><body style='font-family:system-ui;max-width:760px;margin:30px auto;padding:0 18px;line-height:1.65'><a href='/'>← 返回</a><h2>{html.escape(r.get('original_name') or video_id)}</h2><p>ID: <code>{html.escape(video_id)}</code></p><h3>阿屿可读分析</h3><pre style='white-space:pre-wrap'>{analysis}</pre><h3>Gemini 原始观察底稿</h3><pre style='white-space:pre-wrap'>{raw}</pre></body>")
 
 
 @app.get("/api/recent", dependencies=[Depends(require_auth)])

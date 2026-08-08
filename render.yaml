@@ -5,17 +5,21 @@ services:
     plan: free
     healthCheckPath: /health
     envVars:
-      - key: OPENAI_API_KEY
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: DEEPSEEK_API_KEY
         sync: false
       - key: APP_PASSWORD
         sync: false
-      - key: OPENAI_VISION_MODEL
-        value: gpt-5
-      - key: OPENAI_TRANSCRIBE_MODEL
-        value: gpt-4o-mini-transcribe
+      - key: GEMINI_VIDEO_MODEL
+        value: gemini-3.6-flash
+      - key: DEEPSEEK_MODEL
+        value: deepseek-v4-flash
+      - key: DEEPSEEK_BASE_URL
+        value: https://api.deepseek.com
       - key: MAX_UPLOAD_MB
         value: "80"
       - key: MAX_DURATION_SECONDS
-        value: "90"
-      - key: MAX_FRAMES
-        value: "8"
+        value: "60"
+      - key: GEMINI_INLINE_MAX_MB
+        value: "80"

@@ -2,15 +2,16 @@ from __future__ import annotations
 
 import base64
 import json
+import mimetypes
 import os
 import shutil
 import subprocess
-import tempfile
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from google import genai
 from openai import OpenAI
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -20,14 +21,27 @@ TMP_DIR = DATA_DIR / "tmp"
 REPORTS_DIR.mkdir(parents=True, exist_ok=True)
 TMP_DIR.mkdir(parents=True, exist_ok=True)
 
+SUPPORTED_VIDEO_MIME = {
+    ".mp4": "video/mp4",
+    ".mpeg": "video/mpeg",
+    ".mpg": "video/mpg",
+    ".mov": "video/mov",
+    ".avi": "video/avi",
+    ".flv": "video/x-flv",
+    ".webm": "video/webm",
+    ".wmv": "video/wmv",
+    ".3gp": "video/3gpp",
+    ".3gpp": "video/3gpp",
+}
+
 
 def _run(cmd: list[str]) -> subprocess.CompletedProcess:
     return subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
 
 
 def ensure_ffmpeg() -> None:
-    if shutil.which("ffmpeg") is None or shutil.which("ffprobe") is None:
-        raise RuntimeError("没有检测到 ffmpeg/ffprobe。Render 版请确认使用仓库里的 Dockerfile。")
+    if shutil.which("ffprobe") is None:
+        raise RuntimeError("没有检测到 ffprobe。Render 版请确认使用仓库里的 Dockerfile。")
 
 
 def probe_duration(video_path: Path) -> float:
@@ -41,115 +55,133 @@ def probe_duration(video_path: Path) -> float:
         return 0.0
 
 
-def extract_audio(video_path: Path, work_dir: Path) -> Path | None:
-    audio_path = work_dir / "audio.mp3"
-    try:
-        _run([
-            "ffmpeg", "-y", "-i", str(video_path), "-vn",
-            "-ac", "1", "-ar", "16000", "-b:a", "64k", str(audio_path)
-        ])
-    except subprocess.CalledProcessError:
-        return None
-    return audio_path if audio_path.exists() and audio_path.stat().st_size > 0 else None
+def guess_video_mime(video_path: Path, original_name: str) -> str:
+    suffix = Path(original_name).suffix.lower() or video_path.suffix.lower()
+    if suffix in SUPPORTED_VIDEO_MIME:
+        return SUPPORTED_VIDEO_MIME[suffix]
+    guessed, _ = mimetypes.guess_type(original_name)
+    if guessed and guessed.startswith("video/"):
+        return guessed
+    raise RuntimeError("暂时不认识这个视频格式。建议先用 MP4、MOV 或 WebM。")
 
 
-def extract_frames(video_path: Path, work_dir: Path, duration: float, max_frames: int) -> list[tuple[float, Path]]:
-    frame_dir = work_dir / "frames"
-    frame_dir.mkdir(parents=True, exist_ok=True)
-    if duration <= 0:
-        timestamps = [0.0]
-    else:
-        count = max(1, min(max_frames, int(duration // 2) + 1))
-        if count == 1:
-            timestamps = [duration / 2]
-        else:
-            margin = min(0.4, duration * 0.05)
-            start, end = margin, max(duration - margin, 0.0)
-            timestamps = [start + (end - start) * i / (count - 1) for i in range(count)]
-    results: list[tuple[float, Path]] = []
-    for idx, ts in enumerate(timestamps):
-        out = frame_dir / f"frame_{idx:02d}.jpg"
-        try:
-            _run([
-                "ffmpeg", "-y", "-ss", f"{ts:.3f}", "-i", str(video_path),
-                "-frames:v", "1", "-vf", "scale='min(960,iw)':-2", "-q:v", "3", str(out)
-            ])
-            if out.exists() and out.stat().st_size > 0:
-                results.append((ts, out))
-        except subprocess.CalledProcessError:
-            continue
-    return results
+def gemini_watch_video(video_path: Path, original_name: str, duration: float, model: str) -> str:
+    api_key = os.getenv("GEMINI_API_KEY", "").strip()
+    if not api_key:
+        raise RuntimeError("还没有配置 GEMINI_API_KEY。请在 Render 的 Environment 里添加。")
+
+    mime_type = guess_video_mime(video_path, original_name)
+    video_bytes = video_path.read_bytes()
+    b64 = base64.b64encode(video_bytes).decode("ascii")
+    client = genai.Client(api_key=api_key)
+
+    prompt = f"""
+你正在替一个用户的亲密 AI 伙伴观看一段短视频。视频时长约 {duration:.1f} 秒。
+请同时利用视觉和音频信息，严格基于视频本身，不要脑补没有出现的内容。
+
+请用中文输出一份“观察底稿”，尽量保留具体时间点（MM:SS），结构如下：
+1. 一句话概括
+2. 时间线：按发生顺序写关键事件，尽量标注时间
+3. 画面：人物/物体/动作/场景/屏幕文字中明确可见的内容
+4. 声音：能听清的说话内容、音乐、环境声、语气；听不清就明确说听不清
+5. 氛围与可能让分享者想聊的点
+6. 不确定项：快速动作、模糊文字、身份等不能确定的地方
+
+重要：不要把推测写成事实；如果字幕/台词无法准确辨认，宁可注明不确定。
+""".strip()
+
+    interaction = client.interactions.create(
+        model=model,
+        input=[
+            {
+                "type": "video",
+                "data": b64,
+                "mime_type": mime_type,
+            },
+            {"type": "text", "text": prompt},
+        ],
+    )
+    text = getattr(interaction, "output_text", "") or ""
+    if not text.strip():
+        raise RuntimeError("Gemini 没有返回可读的视频分析。")
+    return text.strip()
 
 
-def to_data_url(path: Path) -> str:
-    data = base64.b64encode(path.read_bytes()).decode("ascii")
-    return f"data:image/jpeg;base64,{data}"
+def deepseek_polish(gemini_notes: str, model: str) -> str:
+    api_key = os.getenv("DEEPSEEK_API_KEY", "").strip()
+    if not api_key:
+        return gemini_notes
 
-
-def transcribe_audio(client: OpenAI, audio_path: Path | None, model: str) -> str:
-    if audio_path is None:
-        return ""
-    with audio_path.open("rb") as f:
-        t = client.audio.transcriptions.create(model=model, file=f)
-    return getattr(t, "text", "") or ""
-
-
-def analyze_frames_and_transcript(client: OpenAI, frames: list[tuple[float, Path]], transcript: str, duration: float, model: str) -> str:
-    content: list[dict[str, Any]] = [{
-        "type": "input_text",
-        "text": (
-            "你在分析一个用户想分享给亲密 AI 伙伴观看的短视频。"
-            "严格依据抽帧画面和音频转写，不要补写看不到或听不到的细节。"
-            "输出中文，并按以下结构：\n"
-            "1. 一句话概括\n2. 时间线（尽量引用帧时间）\n3. 画面里明确发生了什么\n"
-            "4. 说了什么/声音线索\n5. 氛围与值得聊的点\n6. 不确定或可能误读的地方\n"
-            f"视频时长约 {duration:.1f} 秒。\n\n音频转写：\n{transcript if transcript else '（无可用音频转写）'}"
-        ),
-    }]
-    for ts, frame_path in frames:
-        content.append({"type": "input_text", "text": f"约 {ts:.1f}s 的画面："})
-        content.append({"type": "input_image", "image_url": to_data_url(frame_path), "detail": "auto"})
-
-    response = client.responses.create(model=model, input=[{"role": "user", "content": content}])
-    return response.output_text
+    client = OpenAI(api_key=api_key, base_url=os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com"))
+    response = client.chat.completions.create(
+        model=model,
+        messages=[
+            {
+                "role": "system",
+                "content": (
+                    "你是视频观察报告的整理员。你不能看到原视频，只能依据 Gemini 的观察底稿。"
+                    "绝对不要新增底稿中没有的信息，也不要把不确定内容改成确定事实。"
+                    "把内容整理得自然、清楚、适合另一个 AI 伙伴随后和用户聊视频。"
+                ),
+            },
+            {
+                "role": "user",
+                "content": (
+                    "请把下面的观察底稿整理成中文最终报告。结构：\n"
+                    "1. 我看到了什么（简短）\n"
+                    "2. 关键时间线\n"
+                    "3. 说了什么/声音线索\n"
+                    "4. 最值得一起聊的地方\n"
+                    "5. 我不确定的地方\n\n"
+                    "观察底稿：\n" + gemini_notes
+                ),
+            },
+        ],
+        temperature=0.2,
+    )
+    text = response.choices[0].message.content or ""
+    return text.strip() or gemini_notes
 
 
 def analyze_video(video_path: Path, original_name: str) -> dict[str, Any]:
     ensure_ffmpeg()
-    api_key = os.getenv("OPENAI_API_KEY", "").strip()
-    if not api_key:
-        raise RuntimeError("还没有配置 OPENAI_API_KEY。请在 Render 的 Environment 里添加。")
 
-    vision_model = os.getenv("OPENAI_VISION_MODEL", "gpt-5")
-    transcribe_model = os.getenv("OPENAI_TRANSCRIBE_MODEL", "gpt-4o-mini-transcribe")
-    max_frames = int(os.getenv("MAX_FRAMES", "8"))
-    max_duration = float(os.getenv("MAX_DURATION_SECONDS", "90"))
+    gemini_key = os.getenv("GEMINI_API_KEY", "").strip()
+    if not gemini_key:
+        raise RuntimeError("还没有配置 GEMINI_API_KEY。请在 Render 的 Environment 里添加。")
 
-    client = OpenAI(api_key=api_key)
+    gemini_model = os.getenv("GEMINI_VIDEO_MODEL", "gemini-3.6-flash")
+    deepseek_model = os.getenv("DEEPSEEK_MODEL", "deepseek-v4-flash")
+    max_duration = float(os.getenv("MAX_DURATION_SECONDS", "60"))
+    max_inline_mb = float(os.getenv("GEMINI_INLINE_MAX_MB", "80"))
+
+    size_mb = video_path.stat().st_size / (1024 * 1024)
+    if size_mb > max_inline_mb:
+        raise RuntimeError(f"视频约 {size_mb:.1f}MB，超过当前 {max_inline_mb:.0f}MB 上限。先压小一点再给我看。")
+
+    duration = probe_duration(video_path)
+    if duration > max_duration:
+        raise RuntimeError(f"视频约 {duration:.1f} 秒，超过当前 {max_duration:.0f} 秒上限。先剪短一点再给我看。")
+
+    gemini_notes = gemini_watch_video(video_path, original_name, duration, gemini_model)
+    final_analysis = deepseek_polish(gemini_notes, deepseek_model)
+
     video_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ") + "-" + uuid.uuid4().hex[:8]
-
-    with tempfile.TemporaryDirectory(dir=TMP_DIR) as td:
-        work_dir = Path(td)
-        duration = probe_duration(video_path)
-        if duration > max_duration:
-            raise RuntimeError(f"视频约 {duration:.1f} 秒，超过当前 {max_duration:.0f} 秒上限。先剪短一点再给我看。")
-        audio_path = extract_audio(video_path, work_dir)
-        frames = extract_frames(video_path, work_dir, duration, max_frames=max_frames)
-        if not frames:
-            raise RuntimeError("没有成功抽出任何视频帧。请确认视频格式可被 FFmpeg 读取。")
-
-        transcript = transcribe_audio(client, audio_path, transcribe_model)
-        analysis = analyze_frames_and_transcript(client, frames, transcript, duration, vision_model)
-
+    ds_enabled = bool(os.getenv("DEEPSEEK_API_KEY", "").strip())
     report = {
         "video_id": video_id,
         "original_name": original_name,
         "created_at": datetime.now(timezone.utc).isoformat(),
         "duration_seconds": round(duration, 3),
-        "frame_count": len(frames),
-        "transcript": transcript,
-        "analysis": analysis,
-        "models": {"vision": vision_model, "transcription": transcribe_model},
+        "size_mb": round(size_mb, 3),
+        "analysis": final_analysis,
+        "gemini_observation": gemini_notes,
+        "transcript": "",
+        "models": {
+            "video_understanding": gemini_model,
+            "text_refinement": deepseek_model if ds_enabled else None,
+        },
+        "pipeline": "Gemini 直接读取视频音画 → DeepSeek 整理（若已配置）",
     }
     (REPORTS_DIR / f"{video_id}.json").write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
     return report
