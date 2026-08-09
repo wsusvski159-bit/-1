@@ -5,21 +5,19 @@ services:
     plan: free
     healthCheckPath: /health
     envVars:
-      - key: GEMINI_API_KEY
-        sync: false
-      - key: DEEPSEEK_API_KEY
+      - key: NEWAPI_API_KEY
         sync: false
       - key: APP_PASSWORD
         sync: false
-      - key: GEMINI_VIDEO_MODEL
+      - key: NEWAPI_BASE_URL
+        value: https://api.qiyiguo.uk
+      - key: GEMINI_MODEL
         value: gemini-3.6-flash
-      - key: DEEPSEEK_MODEL
-        value: deepseek-v4-flash
-      - key: DEEPSEEK_BASE_URL
-        value: https://api.deepseek.com
+      - key: GEMINI_FALLBACK_MODEL
+        value: gemini-2.5-pro
       - key: MAX_UPLOAD_MB
         value: "80"
       - key: MAX_DURATION_SECONDS
         value: "60"
-      - key: GEMINI_INLINE_MAX_MB
-        value: "80"
+      - key: GEMINI_INLINE_TARGET_MB
+        value: "14"
