@@ -22,7 +22,12 @@ TMP_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def _run(cmd: list[str]) -> subprocess.CompletedProcess:
-    return subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    try:
+        return subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    except subprocess.CalledProcessError as e:
+        stderr = (e.stderr or "").strip()
+        tail = stderr[-1800:] if stderr else "没有收到 FFmpeg 的详细错误输出。"
+        raise RuntimeError(f"FFmpeg 处理失败：{tail}") from e
 
 
 def ensure_ffmpeg() -> None:
@@ -42,27 +47,36 @@ def probe_duration(video_path: Path) -> float:
 
 
 def _transcode_for_inline(video_path: Path, work_dir: Path, duration: float, target_mb: float) -> Path:
-    """转成适合 New API Gemini inline_data 的 MP4，并尽量控制在 target_mb 左右。"""
-    out = work_dir / "gemini-input.mp4"
+    """准备适合 New API Gemini inline_data 的 MP4。
+
+    小体积 MP4 直接发送，避免 Render 免费实例为了"再压一次"而白白消耗 CPU/RAM。
+    只有文件偏大时才低资源转码。
+    """
     target_bytes = max(4, int(target_mb * 1024 * 1024))
 
+    # 手机拍出来的短 MP4 如果本来就够小，直接交给 Gemini。
+    # 这也是最稳的路径：不改画面、不改声音、不额外吃 Render 资源。
+    if video_path.suffix.lower() in {".mp4", ".m4v"} and video_path.stat().st_size <= target_bytes:
+        return video_path
+
+    out = work_dir / "gemini-input.mp4"
     if duration > 0.3:
-        total_kbps = int((target_bytes * 8 / duration) / 1000 * 0.86)
-        total_kbps = max(550, min(total_kbps, 2800))
+        total_kbps = int((target_bytes * 8 / duration) / 1000 * 0.82)
+        total_kbps = max(420, min(total_kbps, 1800))
     else:
-        total_kbps = 1600
-    audio_kbps = 96
-    video_kbps = max(420, total_kbps - audio_kbps)
+        total_kbps = 1000
+    audio_kbps = 64
+    video_kbps = max(320, total_kbps - audio_kbps)
 
     def encode(v_kbps: int) -> None:
         _run([
             "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
             "-i", str(video_path),
             "-map", "0:v:0", "-map", "0:a?",
-            "-vf", "scale='min(1280,iw)':-2:force_original_aspect_ratio=decrease",
-            "-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p",
-            "-b:v", f"{v_kbps}k", "-maxrate", f"{int(v_kbps * 1.18)}k", "-bufsize", f"{int(v_kbps * 2)}k",
-            "-c:a", "aac", "-b:a", f"{audio_kbps}k", "-ac", "2", "-ar", "44100",
+            "-vf", "scale='min(720,iw)':-2:force_original_aspect_ratio=decrease",
+            "-c:v", "libx264", "-preset", "ultrafast", "-threads", "1", "-pix_fmt", "yuv420p",
+            "-b:v", f"{v_kbps}k", "-maxrate", f"{int(v_kbps * 1.15)}k", "-bufsize", f"{int(v_kbps * 1.5)}k",
+            "-c:a", "aac", "-b:a", f"{audio_kbps}k", "-ac", "1", "-ar", "32000",
             "-movflags", "+faststart",
             str(out),
         ])
@@ -71,12 +85,11 @@ def _transcode_for_inline(video_path: Path, work_dir: Path, duration: float, tar
     if not out.exists() or out.stat().st_size == 0:
         raise RuntimeError("视频转码失败。请换一个常见视频格式（如 MP4/H.264）再试。")
 
-    # 如果估算偏大，再降一次码率，避免 base64 后把请求顶得太大。
+    # 如果估算仍偏大，再压一次；继续保持单线程，优先兼容 Render Free。
     if out.stat().st_size > target_bytes * 1.12:
-        encode(max(360, int(video_kbps * 0.68)))
+        encode(max(260, int(video_kbps * 0.62)))
 
     return out
-
 
 def _api_settings() -> tuple[str, str, str, str]:
     api_key = os.getenv("NEWAPI_API_KEY", "").strip()
@@ -310,7 +323,7 @@ def analyze_video(video_path: Path, original_name: str) -> dict[str, Any]:
             "primary": primary_model,
             "fallback": fallback_model,
         },
-        "pipeline": "FFmpeg 自动转成小体积 MP4 → New API Gemini inline_data 直接同时看画面+听音轨 → 保存音画报告",
+        "pipeline": "小 MP4 直接发送；较大视频才用低资源 FFmpeg 压缩 → New API Gemini inline_data 同时看画面+听音轨 → 保存音画报告",
         "gateway": base_url,
         "primary_model_error_before_fallback": fallback_error,
         "raw_structured_observation": obs,

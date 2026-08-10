@@ -21,7 +21,7 @@ UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
 MAX_UPLOAD_MB = int(os.getenv("MAX_UPLOAD_MB", "80"))
 APP_PASSWORD = os.getenv("APP_PASSWORD", "").strip()
 
-app = FastAPI(title="阿屿看视频 v1.5")
+app = FastAPI(title="阿屿看视频 v1.5.1")
 security = HTTPBasic(auto_error=False)
 
 
@@ -56,10 +56,10 @@ def page(message: str = "") -> str:
     )
 
     return f"""<!doctype html><html lang='zh-CN'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'>
-<title>阿屿看视频 v1.5</title><style>
+<title>阿屿看视频 v1.5.1</title><style>
 body{{font-family:system-ui,-apple-system,sans-serif;max-width:720px;margin:36px auto;padding:0 18px;line-height:1.6;background:#f7f3e9;color:#243329}}
 .card{{background:#fffdf7;padding:22px;border-radius:20px;box-shadow:0 8px 25px #0001;margin:16px 0}}button{{padding:11px 18px;border:0;border-radius:12px;background:#536b57;color:white;font-size:16px}}input{{max-width:100%}}.msg{{background:#eef5ec;padding:12px;border-radius:12px}}.status{{background:#eef5ec;padding:12px;border-radius:12px}}pre{{white-space:pre-wrap;word-break:break-word;background:#f5f5f2;padding:14px;border-radius:12px}}a{{color:#385a42}}small{{color:#667066}}</style></head><body>
-<h1>阿屿看视频 v1.5</h1><p>Gemini 直接读取短视频：同一次请求里看画面、听原始音轨，再生成一份阿屿可读的音画报告。</p>
+<h1>阿屿看视频 v1.5.1</h1><p>Gemini 直接读取短视频：同一次请求里看画面、听原始音轨，再生成一份阿屿可读的音画报告。</p>
 <div class='status'>{html.escape(setup)}</div>{msg}
 <div class='card'><form action='/upload' method='post' enctype='multipart/form-data'><input type='file' name='video' accept='video/*' required><br><br><button type='submit'>给阿屿看</button></form></div>
 <div class='card'><h3>最近的视频</h3><ul>{items}</ul></div>
