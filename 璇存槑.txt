@@ -1,0 +1,4 @@
+v1.6.2 热修：修复 Render 启动时 MCP SDK v1.x 的参数不兼容。
+只需要用本压缩包里的 app.py 覆盖 GitHub 仓库中的 app.py，其他文件和 Render 环境变量都不要改。
+部署成功后 MCP 地址仍然是：
+https://你的Render域名/bridge-你的MCP_PATH_TOKEN/mcp
